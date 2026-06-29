@@ -1,0 +1,18 @@
+{
+  "name": "oca-tests",
+  "version": "1.0.0",
+  "description": "Data-driven Playwright framework for HPE OCA model configuration automation",
+  "private": true,
+  "scripts": {
+    "test": "playwright test",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.48.0",
+    "@types/node": "^20.14.0",
+    "typescript": "^5.5.0"
+  },
+  "dependencies": {
+    "xlsx": "^0.18.5"
+  }
+}
