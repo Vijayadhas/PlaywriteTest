@@ -4,12 +4,20 @@
   "description": "Data-driven Playwright framework for HPE OCA model configuration automation",
   "private": true,
   "scripts": {
+    "oca": "tsx src/main.ts",
+    "sample:excel": "tsx scripts/create-sample-workbook.ts",
+    "lint": "eslint src scripts tests/unit --ext .ts",
     "test": "playwright test",
+    "test:unit": "playwright test tests/unit --workers=1",
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {
     "@playwright/test": "^1.48.0",
     "@types/node": "^20.14.0",
+    "@typescript-eslint/eslint-plugin": "^7.18.0",
+    "@typescript-eslint/parser": "^7.18.0",
+    "eslint": "^8.57.1",
+    "tsx": "^4.19.0",
     "typescript": "^5.5.0"
   },
   "dependencies": {
