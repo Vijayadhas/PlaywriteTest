@@ -215,7 +215,7 @@ npm run oca -- --input ".\input\models.xlsx" --output ".\output" --profile "C:\o
 
 Jobs are processed sequentially. A failed model is recorded and the tool continues with the remaining enabled rows.
 
-On a normal resumed run, jobs already recorded as successful in the matching output workbook are skipped.
+On a normal run, every enabled job executes again, including jobs previously recorded as successful in the matching output workbook.
 
 ## Common issues
 

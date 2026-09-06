@@ -60,9 +60,6 @@ export async function run(argv = process.argv.slice(2)): Promise<number> {
       const existing = writer.getExisting(job.jobId);
       const retryEligible = existing?.executionStatus === 'Failed' || existing?.executionStatus === 'Unsupported';
       if (options.retryFailed && !retryEligible) continue;
-      if (!options.retryFailed && existing?.executionStatus === 'Success') {
-        console.log(`[${index + 1}/${jobs.length}] ${job.modelNumber} - Skipped - already successful`); continue;
-      }
       if (!job.enabled) {
         const skipped = createPendingResult(job.jobId, job.modelNumber); skipped.executionStatus = 'Skipped';
         skipped.errorMessage = 'Job is disabled'; skipped.endTime = new Date().toISOString();

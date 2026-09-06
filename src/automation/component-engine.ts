@@ -58,6 +58,9 @@ export class ComponentEngine {
   }
 
   async openSection(sectionName: string): Promise<void> {
+    // Power choices can already be expanded after Smart Chassis recalculation.
+    // Clicking their header again would collapse the rows we need to configure.
+    if (/^power\s*suppl(?:y|ies)$/i.test(sectionName) && await this.powerSupplyRows().count() > 0) return;
     const exact = new RegExp(`^\\s*${escapeRegex(sectionName)}\\s*$`, 'i');
     const knownSelectors: Record<string, string> = {
       processor: '#section_header_processor, #section_header_processorSection, [id*="section_header" i][id*="processor" i]',
@@ -84,6 +87,7 @@ export class ComponentEngine {
     }
     section ??= this.page.locator('button, a').filter({ visible: true, hasText: exact }).first();
     await expect(section, `Section ${sectionName}`).toBeVisible({ timeout: 60_000 });
+    if (await section.getAttribute('aria-expanded') === 'true') return;
     await section.scrollIntoViewIfNeeded();
     await section.click({ force: true });
     await waitForBlockingOverlay(this.page);
@@ -290,6 +294,7 @@ export class ComponentEngine {
   }
 
   async executeGeneric(instruction: ComponentInstruction): Promise<void> {
+    await this.openSection(instruction.section);
     if (instruction.selectionType === 'random' && /^(processor|memory|power supplies)$/i.test(instruction.section)) {
       const isProcessor = /^processor$/i.test(instruction.section);
       const sectionPattern = isProcessor
@@ -306,7 +311,6 @@ export class ComponentEngine {
         return;
       }
     }
-    await this.openSection(instruction.section);
     const product = instruction.productNumber;
     switch (instruction.selectionType) {
       case 'radio': await this.selectRadioProduct(product!, instruction.description); break;
@@ -431,18 +435,22 @@ export class ComponentEngine {
       if (!sectionPattern.test(identity) || (excludePattern && excludePattern.test(`${identity} ${description}`))) continue;
       const radio = row.locator('input[type="radio"]').first();
       const radioSelected = await radio.count() > 0 && await radio.isChecked().catch(() => false);
-      const quantityText = ((await row.locator('.item_qty_div, .item_qty').first().textContent().catch(() => '')) ?? '').trim();
-      const visibleQuantity = Number(quantityText.match(/\d+/)?.[0] ?? '0');
-      if (!radioSelected && visibleQuantity <= 0) continue;
+      const inner = row.locator('.item_qty_div').filter({ visible: true }).first();
+      const quantityText = await inner.isVisible()
+        ? (await inner.textContent() ?? '').trim()
+        : ((await row.locator('.item_qty').first().textContent().catch(() => '')) ?? '').trim();
       const productNumber = ((await row.locator('._pid').first().textContent().catch(() => '')) ?? '').trim();
       if (!productNumber) continue;
-      const select = row.locator('select').first();
-      const input = row.locator('input[type="number"], input[type="text"]').first();
+      const select = row.locator('select').filter({ visible: true }).first();
+      const input = row.locator('input[type="number"], input[type="text"]').filter({ visible: true }).first();
       let rawQuantity = quantityText;
-      if (await select.count()) rawQuantity = await select.inputValue().catch(() => quantityText);
+      if (await select.count()) rawQuantity = (await select.locator('option:checked').textContent() ?? '').trim();
       else if (await input.count()) rawQuantity = await input.inputValue().catch(() => quantityText);
-      const parsed = Number(String(rawQuantity).match(/\d+/)?.[0] ?? '1');
-      return { productNumber, quantity: Number.isFinite(parsed) && parsed > 0 ? parsed : 1 };
+      // Read only a complete quantity, never the first digit of menu options or
+      // other text in the cell. A displayed zero is not a committed selection.
+      const parsed = /^\d+$/.test(rawQuantity) ? Number(rawQuantity) : (!rawQuantity && radioSelected ? 1 : 0);
+      if (parsed <= 0) continue;
+      return { productNumber, quantity: parsed };
     }
     return null;
   }

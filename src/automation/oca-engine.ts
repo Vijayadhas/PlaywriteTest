@@ -1,3 +1,4 @@
+import { resolveConfigurationErrors } from './configuration-errors';
 import { expect, type BrowserContext, type Page } from '@playwright/test';
 import type { OcaJob } from '../models/job';
 import type { AutomationResult } from '../models/automation-result';
@@ -81,7 +82,7 @@ export class OcaEngine {
     }
 
     this.currentStep = 'Resolve required configuration errors';
-    await this.measure('Resolve required configuration errors', () => this.resolveConfigurationErrors());
+    await this.measure('Resolve required configuration errors', () => resolveConfigurationErrors(this.activePage, this.components));
     this.currentStep = 'Select Support Services';
     const support = await this.measure('Select Support Services', () => new SupportServices(this.activePage).select(job.serviceType));
     result.serviceExperience = support.serviceExperience;
@@ -121,43 +122,6 @@ export class OcaEngine {
 
   private shouldSkipSmartChassis(section: string, generation: ServerGeneration): boolean {
     return generation === 11 && /^smart\s*chassis$/i.test(section.trim());
-  }
-
-  private async resolveConfigurationErrors(): Promise<void> {
-    const errorIcons = this.activePage.locator([
-      'i.img-alert[title="Error" i]',
-      'i.img-alert.dqe-status-icon-14',
-    ].join(', ')).filter({ visible: true });
-
-    for (let attempt = 1; attempt <= 12; attempt += 1) {
-      await waitForBlockingOverlay(this.activePage);
-      if (await errorIcons.count() === 0) {
-        console.log('[STEP] Configuration validation passed: no error icons remain');
-        return;
-      }
-
-      const icon = errorIcons.first();
-      const header = icon.locator('xpath=ancestor::*[contains(@id,"section_header") or contains(concat(" ", normalize-space(@class), " "), " section_header ")][1]');
-      if (await header.count()) {
-        const sectionName = await header.evaluate((element) => {
-          const copy = element.cloneNode(true) as HTMLElement;
-          copy.querySelectorAll('i, .section_counter, .section_toggle').forEach((node) => node.remove());
-          return (copy.textContent ?? '').replace(/\s+/g, ' ').trim();
-        });
-        if (!sectionName) throw new Error('OCA reported an error icon on an unnamed Menu section');
-        console.log(`[WARN] Required selection is missing in ${sectionName}; resolving it before Services`);
-        await this.components.satisfyRequiredSection(sectionName);
-      } else {
-        console.log('[WARN] Required selection is missing outside a Menu section; resolving the visible control');
-        if (!await this.components.satisfyVisibleRequiredControl()) break;
-      }
-    }
-
-    const unresolved = await errorIcons.evaluateAll((icons) => [...new Set(icons.map((icon) => {
-      const header = icon.closest<HTMLElement>('[id*="section_header"], .section_header');
-      return (header?.innerText || icon.getAttribute('title') || 'Unknown section').replace(/\s+/g, ' ').trim();
-    }))]);
-    throw new Error(`Cannot continue to Services while OCA error icons remain: ${unresolved.join('; ')}`);
   }
 
   private async shouldUseSolutionWizard(job: OcaJob): Promise<boolean> {

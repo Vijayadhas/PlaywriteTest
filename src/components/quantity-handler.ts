@@ -4,7 +4,11 @@ import { escapeRegex, waitForBlockingOverlay } from '../core/waits';
 export class QuantityHandler {
   constructor(private readonly page: Page) {}
 
-  async set(row: Locator, productNumber: string, quantity: number, requireStableVerification = true): Promise<void> {
+  async set(originalRow: Locator, productNumber: string, quantity: number, requireStableVerification = true): Promise<void> {
+    // Random choices arrive as nth() locators. Recalculation can reorder those
+    // rows, so retain the row identity before performing any action.
+    const rowId = await originalRow.getAttribute('id');
+    const row = rowId ? this.page.locator(`[id=${JSON.stringify(rowId)}]`) : originalRow;
     await row.scrollIntoViewIfNeeded();
     const radio = row.locator('input[type="radio"]').filter({ visible: true }).first();
     let selectedNow = false;
@@ -48,11 +52,18 @@ export class QuantityHandler {
       return;
     }
     let stable = 0;
-    await expect.poll(async () => {
-      stable = (await this.readCommitted(row, productNumber)) === String(quantity) ? stable + 1 : 0;
-      return stable;
-    }, { timeout: 30_000, intervals: [750, 1000, 1500], message: `${productNumber} quantity must remain ${quantity}` })
-      .toBeGreaterThanOrEqual(3);
+    const observed = new Set<string>();
+    try {
+      await expect.poll(async () => {
+        const actual = await this.readCommitted(row, productNumber);
+        observed.add(actual || '<empty>');
+        stable = actual === String(quantity) ? stable + 1 : 0;
+        return stable;
+      }, { timeout: 30_000, intervals: [750, 1000, 1500], message: `${productNumber} quantity must remain ${quantity}` })
+        .toBeGreaterThanOrEqual(3);
+    } catch (error) {
+      throw new Error(`${productNumber} quantity must remain ${quantity}; observed: ${[...observed].join(', ') || '<unreadable>'}`, { cause: error });
+    }
   }
 
   async verify(row: Locator, productNumber: string, quantity: number): Promise<void> {
@@ -131,11 +142,6 @@ export class QuantityHandler {
       `[role="listbox"]:visible [role="option"][data-value="${value}"]`,
       `[role="listbox"]:visible [role="option"]`,
       `.ui-menu:visible .ui-menu-item`,
-      `.selecter-options:visible span`,
-      `.selecter-options:visible div`,
-      'li',
-      'span',
-      'div',
     ].join(', ')).filter({ visible: true, hasText: exact });
     await expect.poll(() => options.count(), { timeout: 5_000, message: `Visible quantity option ${value}` }).toBeGreaterThan(0);
 
@@ -162,10 +168,16 @@ export class QuantityHandler {
 
   private async read(row: Locator): Promise<string> {
     const select = row.locator('select').filter({ visible: true }).first();
-    if (await select.isVisible({ timeout: 500 }).catch(() => false)) return (await select.inputValue()).trim();
+    if (await select.isVisible({ timeout: 500 }).catch(() => false)) {
+      // OCA may use an internal option value rather than the displayed quantity.
+      const label = (await select.locator('option:checked').textContent() ?? '').trim();
+      return /^\d+$/.test(label) ? label : (await select.inputValue()).trim();
+    }
     const input = row.locator('input[type="number"], input[type="text"]').filter({ visible: true }).first();
     if (await input.isVisible({ timeout: 500 }).catch(() => false)) return (await input.inputValue()).trim();
-    return ((await row.locator('.item_qty_div, .item_qty').filter({ visible: true }).first().textContent().catch(() => '')) ?? '').trim();
+    const inner = row.locator('.item_qty_div').filter({ visible: true }).first();
+    if (await inner.isVisible()) return (await inner.textContent() ?? '').trim();
+    return ((await row.locator('.item_qty').filter({ visible: true }).first().textContent().catch(() => '')) ?? '').trim();
   }
 
   private async readCommitted(originalRow: Locator, productNumber: string): Promise<string> {

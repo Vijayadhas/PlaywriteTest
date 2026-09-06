@@ -122,8 +122,8 @@ Do not put credentials in the workbook.
 ## Results and recovery
 
 The CLI creates `<input-name>-results.xlsx` in the output directory, never overwriting the input.
-It contains `Results` and `Summary` sheets. Each job is flushed immediately. Existing successful jobs
-are skipped on a normal resume; `--retry-failed` selects only failed or unsupported prior jobs.
+It contains `Results` and `Summary` sheets. Each job is flushed immediately. Normal runs execute every enabled job again,
+including previously successful jobs; `--retry-failed` selects only failed or unsupported prior jobs.
 
 Failure artifacts are stored under `output/screenshots`, `output/traces`, and `output/logs`. SIGINT or
 SIGTERM requests a graceful stop after the current job. One failed job does not stop the remaining batch.
