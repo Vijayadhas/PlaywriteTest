@@ -5,9 +5,14 @@ import { QuantityHandler } from '../components/quantity-handler';
 import { RadioHandler } from '../components/radio-handler';
 import { ConfigurationHandler } from '../components/configuration-handler';
 import { AutomaticDependencyHandler } from '../components/automatic-dependency-handler';
+import type { ServerFamily } from './model-search';
 
 export class UnsupportedComponentError extends Error {
   constructor(message: string) { super(message); this.name = 'UnsupportedComponentError'; }
+}
+
+export function isMemoryBlankProduct(description: string): boolean {
+  return /\b(?:memory\s+)?blank(?:\s+kit)?\b/i.test(description);
 }
 
 export class ComponentEngine {
@@ -16,17 +21,68 @@ export class ComponentEngine {
   private readonly configurations: ConfigurationHandler;
   private readonly dependencies: AutomaticDependencyHandler;
 
-  constructor(private readonly page: Page) {
+  constructor(private readonly page: Page, private readonly serverFamily: ServerFamily = 'unknown') {
     this.quantities = new QuantityHandler(page);
     this.configurations = new ConfigurationHandler(page);
     this.dependencies = new AutomaticDependencyHandler(this.quantities);
   }
 
-  async openSection(sectionName: string): Promise<void> {
+  async showAllProducts(): Promise<void> {
     await waitForBlockingOverlay(this.page);
+    const toggle = this.page.locator('#menu_cust_cmn_toggle').first();
+    const label = this.page.locator('label[for="menu_cust_cmn_toggle"]').first();
+    if (!(await toggle.count()) && !(await label.isVisible({ timeout: 2_000 }).catch(() => false))) {
+      console.log('[INFO] HPE Recommended only toggle is not present; continuing');
+      return;
+    }
+
+    const enabled = await toggle.isChecked().catch(async () => {
+      const className = await label.getAttribute('class').catch(() => '');
+      return /active|checked|on/i.test(className ?? '');
+    });
+    if (!enabled) {
+      console.log('[INFO] HPE Recommended only is already disabled');
+      return;
+    }
+
+    console.log('[STEP] Disabling HPE Recommended only to show all products');
+    if (await label.isVisible({ timeout: 2_000 }).catch(() => false)) await label.click({ force: true });
+    else await toggle.click({ force: true });
+    const yes = this.page.getByRole('button', { name: /^Yes$/i }).filter({ visible: true }).first();
+    if (await yes.isVisible({ timeout: 5_000 }).catch(() => false)) await yes.click({ force: true });
+    await waitForBlockingOverlay(this.page);
+    await expect.poll(() => toggle.isChecked().catch(() => false), {
+      timeout: 30_000,
+      message: 'HPE Recommended only toggle should be disabled',
+    }).toBe(false);
+  }
+
+  async openSection(sectionName: string): Promise<void> {
     const exact = new RegExp(`^\\s*${escapeRegex(sectionName)}\\s*$`, 'i');
-    const section = this.page.locator('[id*="section_header" i], .section_header, button, a')
-      .filter({ visible: true, hasText: exact }).first();
+    const knownSelectors: Record<string, string> = {
+      processor: '#section_header_processor, #section_header_processorSection, [id*="section_header" i][id*="processor" i]',
+      memory: '#section_header_memory, #section_header_memorySection, [id*="section_header" i][id*="memory" i]',
+      'smart chassis': '#section_header_smartChassisSection, #section_header_smartChassis, [id*="section_header" i][id*="smartChassis" i]',
+      'power supplies': '#section_header_power, #section_header_powerSection, [id*="section_header" i][id*="power" i]',
+    };
+    const known = knownSelectors[sectionName.trim().toLowerCase()];
+    let section: Locator | undefined;
+    if (known) {
+      const candidate = this.page.locator(known).filter({ visible: true }).first();
+      if (await candidate.isVisible({ timeout: 5_000 }).catch(() => false)) section = candidate;
+    }
+    const headers = this.page.locator('[id*="section_header" i], .section_header').filter({ visible: true });
+    const words = sectionName.toLowerCase().match(/[a-z0-9]+/g) ?? [];
+    const count = await headers.count();
+    for (let index = 0; !section && index < count; index += 1) {
+      const candidate = headers.nth(index);
+      const identity = `${await candidate.getAttribute('id') ?? ''} ${await candidate.innerText().catch(() => '')}`.toLowerCase();
+      if (words.every((word) => identity.includes(word))) {
+        section = candidate;
+        break;
+      }
+    }
+    section ??= this.page.locator('button, a').filter({ visible: true, hasText: exact }).first();
     await expect(section, `Section ${sectionName}`).toBeVisible({ timeout: 60_000 });
     await section.scrollIntoViewIfNeeded();
     await section.click({ force: true });
@@ -34,6 +90,9 @@ export class ComponentEngine {
   }
 
   async findProductRow(productNumber: string, description?: string): Promise<Locator> {
+    await expect.poll(async () => this.page.locator('tr.item_tr, tr, [role="row"]')
+      .filter({ visible: true, hasText: new RegExp(`\\b${escapeRegex(productNumber)}\\b`, 'i') }).count(),
+    { timeout: 60_000, message: `Visible product row for ${productNumber}` }).toBeGreaterThan(0);
     const escaped = escapeRegex(productNumber);
     const rows = this.page.locator('tr.item_tr, tr, [role="row"]').filter({ visible: true })
       .filter({ hasText: new RegExp(`\\b${escaped}\\b`, 'i') });
@@ -68,23 +127,335 @@ export class ComponentEngine {
     await this.dependencies.verify(await this.findProductRow(productNumber, description), productNumber, expectedQuantity);
   }
 
+  async selectRandomProcessor(): Promise<{ productNumber: string; quantity: number }> {
+    const existing = await this.findExistingSelection(/processor/i, /heat\s*sink|heatsink|fan/i);
+    if (existing) {
+      console.log(`[INFO] Processor ${existing.productNumber} x${existing.quantity} is already selected; leaving it unchanged`);
+      return existing;
+    }
+    // OCA places Processor, Heatsink, and the next component tables in the same expanded panel.
+    // Scope by the recorded element id so a row from the adjacent choice cannot be selected.
+    const candidates = this.page
+      .locator('tr.item_tr[id$="_ProcessorSection_ProcessorChoice"], tr.item_tr[data-elementid="ProcessorSection_ProcessorChoice"]')
+      .filter({ visible: true });
+    const available: Array<{ row: Locator; productNumber: string }> = [];
+    const count = await candidates.count();
+    for (let index = 0; index < count; index += 1) {
+      const row = candidates.nth(index);
+      const productNumber = ((await row.locator('._pid').first().textContent().catch(() => '')) ?? '').trim();
+      const hasRadio = await row.locator('input[type="radio"]').count();
+      const hasQuantity = await row.locator('td.item_qty .item_qty_div, td.item_qty select').count();
+      if (productNumber && hasRadio && hasQuantity) available.push({ row, productNumber });
+    }
+    if (!available.length) {
+      throw new UnsupportedComponentError(
+        `No visible rows matched ProcessorSection_ProcessorChoice (visible processor candidates: ${count})`,
+      );
+    }
+    const selected = available[Math.floor(Math.random() * available.length)];
+    const quantity = Math.random() < 0.5 ? 1 : 2;
+    console.log(`[STEP] Random processor selected: ${selected.productNumber} x${quantity}`);
+    await this.quantities.set(selected.row, selected.productNumber, quantity);
+    return { productNumber: selected.productNumber, quantity };
+  }
+
+  async selectRandomMemory(): Promise<{ productNumber: string; quantity: number }> {
+    const existing = await this.findExistingSelection(/memory/i, /\bblank\b/i);
+    if (existing) {
+      console.log(`[INFO] Memory ${existing.productNumber} x${existing.quantity} is already selected; leaving it unchanged`);
+      return existing;
+    }
+    const choiceTable = this.page.locator('#choice_column_titles_memory_memorySlotsChoice').filter({ visible: true }).first();
+    await expect(choiceTable, 'Memory choice table after opening the Memory section').toBeVisible({ timeout: 60_000 });
+    await choiceTable.scrollIntoViewIfNeeded();
+    await choiceTable.evaluate((element) => element.scrollIntoView({ block: 'center', inline: 'nearest', behavior: 'instant' }));
+    const candidates = this.page
+      .locator('tr.item_tr[data-elementid="memory_memorySlotsChoice"], tr.item_tr[id$="_memory_memorySlotsChoice"]')
+      .filter({ visible: true });
+    const available: Array<{ row: Locator; productNumber: string }> = [];
+    const count = await candidates.count();
+    for (let index = 0; index < count; index += 1) {
+      const row = candidates.nth(index);
+      const productNumber = ((await row.locator('._pid').first().textContent().catch(() => '')) ?? '').trim();
+      const description = ((await row.locator('.item_desc').first().textContent().catch(() => '')) ?? '').replace(/\s+/g, ' ').trim();
+      const hasQuantity = await row.locator('td.item_qty .item_qty_div, td.item_qty select').count();
+      if (productNumber && !isMemoryBlankProduct(description) && hasQuantity) available.push({ row, productNumber });
+    }
+    if (!available.length) {
+      throw new UnsupportedComponentError(
+        `No visible rows matched memory_memorySlotsChoice (visible memory candidates: ${count})`,
+      );
+    }
+    const selected = available[Math.floor(Math.random() * available.length)];
+    const quantity = Math.random() < 0.5 ? 1 : 2;
+    console.log(`[STEP] Random memory selected: ${selected.productNumber} x${quantity}`);
+    // Memory must be confirmed after OCA recalculation. Never continue when the
+    // available row still reads 0, because that means the DIMM was not committed.
+    await this.quantities.set(selected.row, selected.productNumber, quantity, true);
+    return { productNumber: selected.productNumber, quantity };
+  }
+
+  async selectRandomSmartChassis(): Promise<{ productNumber: string; description: string; quantity: number }> {
+    const familyElementIds: Partial<Record<ServerFamily, string>> = {
+      DL360: 'smartChassisSection_templateJsonChoiceDL360',
+      DL380: 'smartChassis_templateJsonChoice',
+      ML350: 'smartChassisSection_templateJsonChoiceML350',
+    };
+    const elementId = familyElementIds[this.serverFamily];
+    const selector = elementId
+      ? `tr.item_tr[data-elementid="${elementId}"]`
+      : [
+        'tr.item_tr[data-elementid*="smartChassis" i][data-elementid*="templateJsonChoice" i]',
+        'tr.item_tr[id*="smartChassis" i][id*="templateJsonChoice" i]',
+      ].join(', ');
+    const candidates = this.page.locator(selector).filter({ visible: true });
+    let rowsVisible = await candidates.first().waitFor({ state: 'visible', timeout: 15_000 })
+      .then(() => true).catch(() => false);
+    if (!rowsVisible) {
+      console.log(`[INFO] Reopening Smart Chassis section for ${this.serverFamily}`);
+      const header = this.page.getByRole('button', { name: /Smart Chassis/i }).filter({ visible: true }).first()
+        .or(this.page.locator('#section_header_smartChassisSection, #section_header_smartChassis, [id*="section_header" i][id*="smartChassis" i]')
+          .filter({ visible: true }).first()).first();
+      if (await header.isVisible().catch(() => false)) {
+        await header.click({ force: true });
+        await waitForBlockingOverlay(this.page);
+        rowsVisible = await candidates.first().waitFor({ state: 'visible', timeout: 30_000 })
+          .then(() => true).catch(() => false);
+      }
+    }
+    if (!rowsVisible) {
+      return this.selectAlternateSmartChassisLayout();
+    }
+    await candidates.first().scrollIntoViewIfNeeded();
+    const available: Array<{ row: Locator; productNumber: string; description: string }> = [];
+    const count = await candidates.count();
+    for (let index = 0; index < count; index += 1) {
+      const row = candidates.nth(index);
+      const productNumber = ((await row.locator('._pid').first().textContent().catch(() => '')) ?? '').trim();
+      const description = ((await row.locator('.item_desc').first().textContent().catch(() => '')) ?? '').replace(/\s+/g, ' ').trim();
+      if (productNumber && description && await row.locator('input[type="radio"]').count()) {
+        available.push({ row, productNumber, description });
+      }
+    }
+    if (!available.length) {
+      throw new UnsupportedComponentError(
+        `No visible Smart Chassis rows matched ${this.serverFamily} layout ${elementId ?? '(generic)'} (visible candidates: ${count})`,
+      );
+    }
+    const selected = available[Math.floor(Math.random() * available.length)];
+    console.log(`[STEP] Random Smart Chassis selected: ${selected.description} (${selected.productNumber}) x1`);
+    await this.radios.select(selected.row, selected.description);
+    await waitForBlockingOverlay(this.page);
+    await this.quantities.verify(selected.row, selected.productNumber, 1);
+    return { productNumber: selected.productNumber, description: selected.description, quantity: 1 };
+  }
+
+  async selectRandomPowerSupply(): Promise<{ productNumber: string; description: string; quantity?: number }> {
+    const existing = await this.findExistingSelection(/power/i);
+    if (existing) {
+      console.log(`[INFO] Power Supplies ${existing.productNumber} x${existing.quantity} is already selected; leaving it unchanged`);
+      return { ...existing, description: existing.productNumber };
+    }
+    // Product descriptions are not guaranteed to contain the words "Power Supply".
+    // The stable OCA identity is the power choice/slot element id (for example
+    // item_tr_P44712-B21_power_powerSlots on DL360 Gen12).
+    const candidates = this.powerSupplyRows();
+    const choicesVisible = await candidates.first().waitFor({ state: 'visible', timeout: 60_000 })
+      .then(() => true).catch(() => false);
+    if (!choicesVisible) {
+      throw new UnsupportedComponentError(
+        `${this.serverFamily} Power Supplies section did not expose any selectable power slot rows`,
+      );
+    }
+    await candidates.first().scrollIntoViewIfNeeded();
+    const available: Array<{ row: Locator; productNumber: string; description: string }> = [];
+    const count = await candidates.count();
+    for (let index = 0; index < count; index += 1) {
+      const row = candidates.nth(index);
+      const productNumber = ((await row.locator('._pid').first().textContent().catch(() => '')) ?? '').trim();
+      const description = ((await row.locator('.item_desc').first().textContent().catch(() => '')) ?? '').replace(/\s+/g, ' ').trim();
+      const hasQuantity = await row.locator('td.item_qty .item_qty_div, td.item_qty select').count();
+      if (productNumber && hasQuantity) available.push({ row, productNumber, description: description || productNumber });
+    }
+    if (!available.length) {
+      throw new UnsupportedComponentError(`No visible Power Supply product rows were available (visible candidates: ${count})`);
+    }
+    const selected = available[Math.floor(Math.random() * available.length)];
+    // Quantity 1 is the proven valid committed value for the supported base-model
+    // power-slot layouts. OCA can add required redundant dependencies itself.
+    const quantity = 1;
+    console.log(`[STEP] Random Power Supply selected: ${selected.description} (${selected.productNumber}) x${quantity}`);
+    await this.quantities.set(selected.row, selected.productNumber, quantity, false);
+    return { productNumber: selected.productNumber, description: selected.description, quantity };
+  }
+
   async executeGeneric(instruction: ComponentInstruction): Promise<void> {
+    if (instruction.selectionType === 'random' && /^(processor|memory|power supplies)$/i.test(instruction.section)) {
+      const isProcessor = /^processor$/i.test(instruction.section);
+      const sectionPattern = isProcessor
+        ? /processor/i
+        : /^memory$/i.test(instruction.section) ? /memory/i : /power/i;
+      const excludePattern = isProcessor
+        ? /heat\s*sink|heatsink|fan/i
+        : /^memory$/i.test(instruction.section) ? /\bblank\b/i : undefined;
+      const existing = await this.findExistingSelection(sectionPattern, excludePattern);
+      if (existing) {
+        console.log(`[INFO] ${instruction.section} ${existing.productNumber} x${existing.quantity} is already selected; leaving it unchanged`);
+        instruction.productNumber = existing.productNumber;
+        instruction.quantity = existing.quantity;
+        return;
+      }
+    }
     await this.openSection(instruction.section);
     const product = instruction.productNumber;
     switch (instruction.selectionType) {
       case 'radio': await this.selectRadioProduct(product!, instruction.description); break;
       case 'quantity': await this.setProductQuantity(product!, instruction.quantity!, instruction.description); break;
+      case 'random': {
+        const selected = /^processor$/i.test(instruction.section)
+          ? await this.selectRandomProcessor()
+          : /^memory$/i.test(instruction.section)
+            ? await this.selectRandomMemory()
+            : /^smart chassis$/i.test(instruction.section)
+              ? await this.selectRandomSmartChassis()
+              : await this.selectRandomPowerSupply();
+        instruction.productNumber = selected.productNumber;
+        instruction.quantity = selected.quantity;
+        if ('description' in selected && typeof selected.description === 'string') instruction.description = selected.description;
+        break;
+      }
       case 'automatic': await this.verifySelectedQuantity(product!, instruction.quantity ?? 1, instruction.description); break;
       case 'configuration': await this.selectConfiguration(instruction.configurationText!); break;
       case 'checkbox': {
         const row = await this.findProductRow(product!, instruction.description);
         const checkbox = row.locator('input[type="checkbox"]').filter({ visible: true }).first();
         await expect(checkbox).toBeVisible(); if (!(await checkbox.isChecked())) await checkbox.check({ force: true });
-        await expect(checkbox).toBeChecked(); break;
+        await expect(checkbox).toBeChecked();
+        await waitForBlockingOverlay(this.page);
+        break;
       }
       case 'default': break;
       default: throw new UnsupportedComponentError(`Unsupported selection type for ${product ?? instruction.section}`);
     }
-    await waitForBlockingOverlay(this.page);
+  }
+
+  /** Opens a section reported by OCA as invalid and supplies a safe required value. */
+  async satisfyRequiredSection(sectionName: string): Promise<void> {
+    await this.openSection(sectionName);
+    if (/^processor$/i.test(sectionName)) { await this.selectRandomProcessor(); return; }
+    if (/^memory$/i.test(sectionName)) { await this.selectRandomMemory(); return; }
+    if (/^smart\s*chassis$/i.test(sectionName)) { await this.selectRandomSmartChassis(); return; }
+    if (/^power\s*suppl(?:y|ies)$/i.test(sectionName)) { await this.selectRandomPowerSupply(); return; }
+    if (!await this.satisfyVisibleRequiredControl()) {
+      throw new UnsupportedComponentError(`No selectable required control was found in error section ${sectionName}`);
+    }
+  }
+
+  /** Handles required dropdowns/rows not represented by an Excel component instruction. */
+  async satisfyVisibleRequiredControl(): Promise<boolean> {
+    const selects = this.page.locator('select:visible');
+    for (let index = 0; index < await selects.count(); index += 1) {
+      const select = selects.nth(index);
+      const selected = await select.locator('option:checked').first().evaluate((option) => ({
+        value: (option as HTMLOptionElement).value,
+        text: (option.textContent ?? '').replace(/\s+/g, ' ').trim(),
+      })).catch(() => ({ value: '', text: '' }));
+      if (selected.value && selected.value !== 'none_item' && !/please make a selection|^none\.?$/i.test(selected.text)) continue;
+      const available = await select.locator('option:not([disabled])').evaluateAll((options) => options.map((option) => ({
+        value: (option as HTMLOptionElement).value,
+        text: (option.textContent ?? '').replace(/\s+/g, ' ').trim(),
+      })));
+      const picked = available.find((option) => option.value && option.value !== 'none_item'
+        && !/please make a selection|^none\.?$/i.test(option.text));
+      if (!picked) continue;
+      console.log(`[STEP] Required dropdown: ${picked.text}`);
+      await select.selectOption(picked.value, { force: true });
+      await waitForBlockingOverlay(this.page);
+      return true;
+    }
+
+    const row = this.page.locator('tr.item_tr:visible, tr[role="row"]:visible')
+      .filter({ has: this.page.locator('input[type="radio"]:not(:checked)') }).first();
+    if (await row.isVisible({ timeout: 1_000 }).catch(() => false)) {
+      const productNumber = ((await row.locator('._pid').first().textContent().catch(() => '')) ?? '').trim();
+      if (productNumber && await row.locator('td.item_qty .item_qty_div, td.item_qty select').count()) {
+        console.log(`[STEP] Required product: ${productNumber} x1`);
+        await this.quantities.set(row, productNumber, 1, false);
+      } else {
+        await row.locator('input[type="radio"]').first().check({ force: true });
+        await waitForBlockingOverlay(this.page);
+      }
+      return true;
+    }
+    return false;
+  }
+
+  private async selectAlternateSmartChassisLayout(): Promise<{ productNumber: string; description: string; quantity: number }> {
+    const requiredRows = ['Select Defaults for Smart Chassis', 'Config 65'];
+    const selected: string[] = [];
+    for (const description of requiredRows) {
+      const row = this.page.locator('tr.item_tr, tr, [role="row"]')
+        .filter({ visible: true, hasText: description }).first();
+      if (!(await row.isVisible({ timeout: 5_000 }).catch(() => false))) continue;
+      await this.quantities.set(row, description, 1, false);
+      selected.push(description);
+    }
+    if (!selected.length) {
+      throw new UnsupportedComponentError(
+        `Smart Chassis section did not expose the ${this.serverFamily} choice table or the alternate Defaults/Config 65 layout`,
+      );
+    }
+    const description = selected.join(' + ');
+    console.log(`[INFO] Alternate Smart Chassis layout configured: ${description}`);
+    return { productNumber: description, description, quantity: 1 };
+  }
+
+  private async findExistingSelection(
+    sectionPattern: RegExp,
+    excludePattern?: RegExp,
+  ): Promise<{ productNumber: string; quantity: number } | null> {
+    const sectionName = /memory/i.test(sectionPattern.source)
+      ? 'memory'
+      : /power/i.test(sectionPattern.source) ? 'power' : 'processor';
+    const rows = sectionName === 'power'
+      ? this.powerSupplyRows()
+      : this.page.locator([
+        `tr.item_tr[id*="${sectionName}" i]`,
+        `tr.item_tr[data-elementid*="${sectionName}" i]`,
+      ].join(', ')).filter({ visible: true });
+    const count = await rows.count();
+    for (let index = 0; index < count; index += 1) {
+      const row = rows.nth(index);
+      const identity = `${await row.getAttribute('id') ?? ''} ${await row.getAttribute('data-elementid') ?? ''}`;
+      const description = ((await row.locator('.item_desc').first().textContent().catch(() => '')) ?? '').replace(/\s+/g, ' ').trim();
+      if (!sectionPattern.test(identity) || (excludePattern && excludePattern.test(`${identity} ${description}`))) continue;
+      const radio = row.locator('input[type="radio"]').first();
+      const radioSelected = await radio.count() > 0 && await radio.isChecked().catch(() => false);
+      const quantityText = ((await row.locator('.item_qty_div, .item_qty').first().textContent().catch(() => '')) ?? '').trim();
+      const visibleQuantity = Number(quantityText.match(/\d+/)?.[0] ?? '0');
+      if (!radioSelected && visibleQuantity <= 0) continue;
+      const productNumber = ((await row.locator('._pid').first().textContent().catch(() => '')) ?? '').trim();
+      if (!productNumber) continue;
+      const select = row.locator('select').first();
+      const input = row.locator('input[type="number"], input[type="text"]').first();
+      let rawQuantity = quantityText;
+      if (await select.count()) rawQuantity = await select.inputValue().catch(() => quantityText);
+      else if (await input.count()) rawQuantity = await input.inputValue().catch(() => quantityText);
+      const parsed = Number(String(rawQuantity).match(/\d+/)?.[0] ?? '1');
+      return { productNumber, quantity: Number.isFinite(parsed) && parsed > 0 ? parsed : 1 };
+    }
+    return null;
+  }
+
+  private powerSupplyRows(): Locator {
+    const identified = this.page.locator([
+      'tr.item_tr[id*="_power_" i]',
+      'tr.item_tr[data-elementid*="power" i]',
+      'tr[role="row"][id*="_power_" i]',
+    ].join(', '));
+    const described = this.page.locator('tr.item_tr, tr[role="row"]').filter({ hasText: /Power Supply/i });
+    return identified.or(described).filter({ visible: true })
+      .filter({ has: this.page.locator('td.item_qty .item_qty_div, td.item_qty select') })
+      .filter({ has: this.page.locator('._pid') });
   }
 }

@@ -1,4 +1,4 @@
-export const selectionTypes = ['radio', 'quantity', 'checkbox', 'configuration', 'automatic', 'default'] as const;
+export const selectionTypes = ['radio', 'quantity', 'random', 'checkbox', 'configuration', 'automatic', 'default'] as const;
 
 export type SelectionType = (typeof selectionTypes)[number];
 

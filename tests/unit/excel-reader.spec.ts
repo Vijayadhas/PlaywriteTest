@@ -19,6 +19,8 @@ function workbookAt(models: Record<string, unknown>[], components: Record<string
 test('maps and sequences detailed Excel instructions', () => {
   const file = workbookAt([{
     'Job ID': 'J-1', 'Model Number': 'P72176-B21', 'Service Type': 'Lite',
+    'Model Description': 'HPE ProLiant configured model', 'Integration Rack Part number': 'P9K08A',
+    Server: 'HPE ProLiant DL360 Gen11',
     'Generate End BOM': 'Yes', Enabled: 'Yes',
   }], [
     { 'Job ID': 'J-1', Section: 'Memory', 'Product Number': 'MEM-1', Quantity: 4, 'Selection Type': 'quantity', Sequence: 20 },
@@ -26,7 +28,11 @@ test('maps and sequences detailed Excel instructions', () => {
   ]);
   const jobs = new ExcelReader().read(file);
   expect(jobs).toHaveLength(1);
-  expect(jobs[0]).toMatchObject({ jobId: 'J-1', modelNumber: 'P72176-B21', serviceType: 'Lite', generateEndBom: true });
+  expect(jobs[0]).toMatchObject({
+    jobId: 'J-1', modelNumber: 'P72176-B21', modelDescription: 'HPE ProLiant configured model',
+    integrationRackPartNumber: 'P9K08A', serviceType: 'Lite', generateEndBom: true,
+    server: 'HPE ProLiant DL360 Gen11',
+  });
   expect(jobs[0].source.kind).toBe('detailed-excel');
   if (jobs[0].source.kind === 'detailed-excel') {
     expect(jobs[0].source.instructions.map((item) => item.productNumber)).toEqual(['CPU-1', 'MEM-1']);
@@ -61,8 +67,46 @@ test('maps one-row business worksheet without a Components tab', () => {
   if (job.source.kind === 'detailed-excel') {
     expect(job.source.instructions.map((item) => [item.section, item.productNumber, item.quantity])).toEqual([
       ['Processor', 'CPU-1', 2], ['Memory', 'MEM-1', 4], ['Smart Chassis', 'P72221-B21', 1],
-      ['Power Supplies', 'PSU-1', 2],
+      ['Smart Chassis', undefined, undefined], ['Power Supplies', 'PSU-1', 2],
     ]);
-    expect(job.source.instructions[2].configurationText).toBe('Config # 3-18-1');
+    expect(job.source.instructions.map((item) => item.selectionType)).toEqual([
+      'quantity', 'quantity', 'quantity', 'configuration', 'quantity',
+    ]);
   }
+});
+
+test('uses random component instructions when optional business cells are blank', () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'oca-flat-random-'));
+  const file = path.join(directory, 'input.xlsx');
+  const workbook = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(workbook, XLSX.utils.json_to_sheet([{
+    'Job ID': 'FLAT-2', 'Model Number': 'P72176-B21', Processor: '', Memory: '',
+    'Smart Chassis Product': '', 'Power Supply': '', Service: '',
+  }]), 'Models');
+  XLSX.writeFile(workbook, file);
+
+  const job = new ExcelReader().read(file)[0];
+  expect(job.serviceType).toBe('Random');
+  if (job.source.kind === 'detailed-excel') {
+    expect(job.source.instructions.map((item) => item.selectionType)).toEqual(['random', 'random', 'random', 'random']);
+  }
+});
+
+test('recognizes Solution and Solutions columns case-insensitively and defaults to normal model', () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'oca-flat-solutions-'));
+  const file = path.join(directory, 'input.xlsx');
+  const workbook = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(workbook, XLSX.utils.json_to_sheet([
+    { 'Job ID': 'SOLUTION-1', 'Model Number': 'S1J88A', Solutions: 'yEs' },
+    { 'Job ID': 'SOLUTION-2', 'Model Number': 'S2V31C', Solution: 'Yes' },
+    { 'Job ID': 'SOLUTION-3', 'Model Number': 'S2V31C', ' Solution ': 'YES' },
+    { 'Job ID': 'SOLUTION-4', 'Model Number': 'S3V83A', Solution: 'Solution Wizard' },
+    { 'Job ID': 'SOLUTION-5', 'Model Number': 'S3V83A', 'Product or Solution Description': 'Solution Wizard' },
+    { 'Job ID': 'NORMAL-1', 'Model Number': 'P72176-B21', Solutions: 'No' },
+    { 'Job ID': 'NORMAL-2', 'Model Number': 'P86963-B21', Solutions: '' },
+  ]), 'Models');
+  XLSX.writeFile(workbook, file);
+
+  const jobs = new ExcelReader().read(file);
+  expect(jobs.map((job) => job.isSolution)).toEqual([true, true, true, true, true, false, false]);
 });

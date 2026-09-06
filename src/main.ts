@@ -32,11 +32,20 @@ export async function run(argv = process.argv.slice(2)): Promise<number> {
     profilePath: options.profile, headed: options.headed, trace: options.trace,
     actionTimeoutMs: Number(process.env.OCA_ACTION_TIMEOUT_MS ?? 30_000),
     navigationTimeoutMs: Number(process.env.OCA_NAVIGATION_TIMEOUT_MS ?? 90_000),
+  }, (message) => {
+    console.log(message);
+    logger.info('Browser lifecycle', { message });
   });
   const traces = new TraceManager(session, options.output, options.trace);
   let stopRequested = false;
-  const stop = () => { stopRequested = true; console.log('[INFO] Graceful stop requested; finishing the current job'); };
-  process.once('SIGINT', stop); process.once('SIGTERM', stop);
+  const stop = (signal: string) => {
+    stopRequested = true;
+    console.log(`[INFO] Graceful stop requested by ${signal}; finishing the current job (pid=${process.pid}, parent=${process.ppid})`);
+    logger.info('Stop signal received', { signal, pid: process.pid, parentPid: process.ppid });
+  };
+  const onSigint = () => stop('SIGINT');
+  const onSigterm = () => stop('SIGTERM');
+  process.on('SIGINT', onSigint); process.on('SIGTERM', onSigterm);
   let failures = 0;
 
   try {
@@ -83,8 +92,8 @@ export async function run(argv = process.argv.slice(2)): Promise<number> {
       }
     }
   } finally {
-    process.removeListener('SIGINT', stop); process.removeListener('SIGTERM', stop);
     await session.close();
+    process.removeListener('SIGINT', onSigint); process.removeListener('SIGTERM', onSigterm);
   }
   console.log(`[INFO] Results written to ${writer.outputPath}`);
   return failures ? 1 : 0;

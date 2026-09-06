@@ -6,9 +6,24 @@ export interface AutomationResult {
   executionStatus: ExecutionStatus;
   ucid: string;
   quotationMode: string;
+  serviceExperience: string;
+  serviceTerm: string;
+  dataPrivacy: string;
   ocaConfigStatus: string;
   endBomStatus: string;
+  startBomId: string;
   endBomId: string;
+  endBomAssociated: string;
+  startBillingTier: string;
+  startBillingTierCustomName: string;
+  startAllocatedMemory: string;
+  startServerCount: string;
+  startUsedCpuCore: string;
+  endBillingTier: string;
+  endBillingTierCustomName: string;
+  endAllocatedMemory: string;
+  endServerCount: string;
+  endUsedCpuCore: string;
   selectedComponents: string;
   startTime: string;
   endTime: string;
@@ -27,9 +42,24 @@ export function createPendingResult(jobId: string, modelNumber: string, retryCou
     executionStatus: 'Failed',
     ucid: '',
     quotationMode: '',
+    serviceExperience: '',
+    serviceTerm: '',
+    dataPrivacy: '',
     ocaConfigStatus: '',
     endBomStatus: 'Not requested',
+    startBomId: '',
     endBomId: '',
+    endBomAssociated: 'No',
+    startBillingTier: '',
+    startBillingTierCustomName: '',
+    startAllocatedMemory: '',
+    startServerCount: '',
+    startUsedCpuCore: '',
+    endBillingTier: '',
+    endBillingTierCustomName: '',
+    endAllocatedMemory: '',
+    endServerCount: '',
+    endUsedCpuCore: '',
     selectedComponents: '',
     startTime: new Date().toISOString(),
     endTime: '',

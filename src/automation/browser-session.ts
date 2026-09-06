@@ -12,12 +12,20 @@ export interface BrowserSessionOptions {
 
 export class BrowserSession {
   private context?: BrowserContext;
+  private closing = false;
 
-  constructor(private readonly options: BrowserSessionOptions) {}
+  constructor(
+    private readonly options: BrowserSessionOptions,
+    private readonly report: (message: string) => void = console.log,
+  ) {}
 
   async start(): Promise<BrowserContext> {
     if (this.context) return this.context;
+    this.closing = false;
     this.context = await chromium.launchPersistentContext(path.resolve(this.options.profilePath), {
+      // The runner owns these signals and finishes the active job before cleanup.
+      handleSIGINT: false,
+      handleSIGTERM: false,
       headless: !this.options.headed,
       viewport: { width: 1920, height: 1080 },
       ignoreHTTPSErrors: true,
@@ -28,8 +36,21 @@ export class BrowserSession {
     });
     this.context.setDefaultTimeout(this.options.actionTimeoutMs);
     this.context.setDefaultNavigationTimeout(this.options.navigationTimeoutMs);
-    for (const page of this.context.pages()) await installOcaShim(page);
-    this.context.on('page', (page) => void installOcaShim(page));
+    this.context.on('close', () => this.report(
+      `[${this.closing ? 'INFO' : 'ERROR'}] Browser context closed (${this.closing ? 'runner cleanup' : 'unexpected'})`,
+    ));
+    const observePage = (page: Page) => {
+      page.on('crash', () => this.report('[ERROR] Browser page crashed'));
+      page.on('close', () => this.report(`[INFO] Browser page closed (${this.closing ? 'runner cleanup' : 'outside runner cleanup'})`));
+    };
+    for (const page of this.context.pages()) {
+      observePage(page);
+      await installOcaShim(page);
+    }
+    this.context.on('page', (page) => {
+      observePage(page);
+      void installOcaShim(page).catch((error: unknown) => this.report(`[WARN] Page initialization failed: ${String(error)}`));
+    });
     return this.context;
   }
 
@@ -51,6 +72,7 @@ export class BrowserSession {
   }
 
   async close(): Promise<void> {
+    this.closing = true;
     await this.context?.close().catch(() => undefined);
     this.context = undefined;
   }

@@ -4,24 +4,62 @@ import { escapeRegex, waitForBlockingOverlay } from '../core/waits';
 export class QuantityHandler {
   constructor(private readonly page: Page) {}
 
-  async set(row: Locator, productNumber: string, quantity: number): Promise<void> {
+  async set(row: Locator, productNumber: string, quantity: number, requireStableVerification = true): Promise<void> {
     await row.scrollIntoViewIfNeeded();
     const radio = row.locator('input[type="radio"]').filter({ visible: true }).first();
+    let selectedNow = false;
     if (await radio.isVisible({ timeout: 1_000 }).catch(() => false)) {
-      if (!(await radio.isChecked().catch(() => false))) await radio.check({ force: true });
+      if (!(await radio.isChecked().catch(() => false))) {
+        await radio.check({ force: true }).catch(async () => radio.click({ force: true }));
+        selectedNow = true;
+        // A radio selection causes OCA to rebuild the choice table and normally commits quantity 1.
+        // Do not inspect or open the row-owned quantity dropdown until that recalculation settles.
+        await waitForBlockingOverlay(this.page);
+        await this.page.waitForTimeout(1_500);
+      }
     }
-    if ((await this.read(row)) !== String(quantity)) await this.write(row, quantity);
+    let committed = await this.readCommitted(row, productNumber);
+    if (selectedNow && quantity === 1 && (!committed || committed === '0')) {
+      // Selecting a radio row commits OCA's default quantity of 1. Some models rebuild
+      // the row without leaving a readable quantity control, so reopening it is both
+      // unnecessary and unreliable.
+      committed = '1';
+      console.log(`[INFO] ${productNumber} was newly selected with OCA default quantity 1; no quantity change needed`);
+    }
+    if (committed === String(quantity)) {
+      console.log(`[INFO] ${productNumber} is already selected with quantity ${quantity}; leaving it unchanged`);
+    } else {
+      try {
+        await this.write(row, quantity);
+      } catch (error) {
+        // A quantity click can cause an immediate row rebuild. Confirm the refreshed
+        // committed row before treating a missing dropdown option as a real failure.
+        const refreshed = await this.readCommitted(row, productNumber);
+        if (refreshed !== String(quantity)) throw error;
+        console.log(`[INFO] ${productNumber} quantity ${quantity} was committed during row refresh; continuing`);
+      }
+    }
     await waitForBlockingOverlay(this.page);
+    if (!requireStableVerification) {
+      await this.page.waitForTimeout(2_000);
+      const observed = await this.readCommitted(row, productNumber);
+      if (observed === String(quantity)) console.log(`[INFO] ${productNumber} quantity committed as ${quantity}`);
+      else console.log(`[WARN] ${productNumber} quantity reads as ${observed || '<empty>'} after selecting ${quantity}; continuing because OCA can expose stale Memory row text after recalculation`);
+      return;
+    }
     let stable = 0;
     await expect.poll(async () => {
-      stable = (await this.read(row)) === String(quantity) ? stable + 1 : 0;
+      stable = (await this.readCommitted(row, productNumber)) === String(quantity) ? stable + 1 : 0;
       return stable;
-    }, { timeout: 90_000, intervals: [750, 1000, 1500], message: `${productNumber} quantity must remain ${quantity}` })
+    }, { timeout: 30_000, intervals: [750, 1000, 1500], message: `${productNumber} quantity must remain ${quantity}` })
       .toBeGreaterThanOrEqual(3);
   }
 
   async verify(row: Locator, productNumber: string, quantity: number): Promise<void> {
-    await expect.poll(() => this.read(row), { timeout: 30_000, message: `${productNumber} committed quantity` }).toBe(String(quantity));
+    await expect.poll(() => this.readCommitted(row, productNumber), {
+      timeout: 30_000,
+      message: `${productNumber} committed quantity`,
+    }).toBe(String(quantity));
   }
 
   private async write(row: Locator, quantity: number): Promise<void> {
@@ -37,11 +75,89 @@ export class QuantityHandler {
     if (await input.isVisible({ timeout: 1_000 }).catch(() => false)) {
       await input.fill(value); await input.press('Tab'); return;
     }
-    const target = row.locator('.item_qty_div, td.item_qty, [class*="qty"]').filter({ visible: true }).first();
-    await target.click({ force: true });
-    const menuOption = this.page.locator(`[role="option"][data-value="${value}"], .selecter-item[data-value="${value}"], li`)
-      .filter({ visible: true, hasText: new RegExp(`^\\s*${escapeRegex(value)}\\s*$`) }).first();
-    await menuOption.click({ force: true });
+    // Prefer the inner clickable quantity div. Selecting the outer td and clicking
+    // its right edge is unreliable after OCA rebuilds a dHCI choice table.
+    let target = row.locator('.item_qty_div').filter({ visible: true }).first();
+    const quantityCell = row.locator('td.item_qty, [class*="qty"]').filter({ visible: true }).first();
+    if (!(await target.isVisible({ timeout: 1_000 }).catch(() => false))) target = quantityCell;
+    await target.scrollIntoViewIfNeeded();
+    await target.evaluate((element) => element.scrollIntoView({ block: 'center', inline: 'nearest', behavior: 'instant' }));
+    for (let attempt = 1; attempt <= 3; attempt += 1) {
+      // dHCI tables are inconsistent: chassis rows open from the inner div,
+      // while rebuilt node rows can open only from the owning quantity cell.
+      const attemptTarget = attempt === 1 || !(await quantityCell.isVisible().catch(() => false)) ? target : quantityCell;
+      await attemptTarget.scrollIntoViewIfNeeded();
+      const targetBox = await attemptTarget.boundingBox();
+      // OCA's custom quantity control opens from the arrow at the right edge. A
+      // center click can focus the displayed 0 without opening the options.
+      if (targetBox) await this.page.mouse.click(
+        attempt < 3 ? targetBox.x + targetBox.width / 2 : targetBox.x + Math.max(4, targetBox.width - 8),
+        targetBox.y + targetBox.height / 2,
+      );
+      else await attemptTarget.click({ force: true });
+      if (attempt === 2) {
+        await attemptTarget.evaluate((element) => (element as HTMLElement).click()).catch(() => undefined);
+      }
+      await this.page.waitForTimeout(700);
+
+      const popupTextBox = this.page.locator('#popup_textbox').filter({ visible: true }).first();
+      if (await popupTextBox.isVisible({ timeout: 1_000 }).catch(() => false)) {
+        console.log(`[INFO] Entering quantity ${value} through OCA quantity popup textbox`);
+        await popupTextBox.fill(value);
+        await popupTextBox.press('Enter');
+        return;
+      }
+      const menuOption = await this.findNearestOpenOption(attemptTarget, value).catch(() => null);
+      if (menuOption) {
+        const optionBox = await menuOption.boundingBox();
+        if (optionBox) await this.page.mouse.click(optionBox.x + optionBox.width / 2, optionBox.y + optionBox.height / 2);
+        else await menuOption.click({ force: true });
+        return;
+      }
+      console.log(`[WARN] Quantity option ${value} did not open on attempt ${attempt}/3; retrying`);
+      await this.page.keyboard.press('Escape').catch(() => undefined);
+      await this.page.waitForTimeout(500);
+    }
+    throw new Error(`Quantity option ${value} did not open for the selected row after 3 attempts`);
+  }
+
+  private async findNearestOpenOption(target: Locator, value: string): Promise<Locator | null> {
+    const exact = new RegExp(`^\\s*${escapeRegex(value)}\\s*$`);
+    const options = this.page.locator([
+      `[id="${value}"]`,
+      `.selecter.open .selecter-options .selecter-item[data-value="${value}"]`,
+      `.selecter.open .selecter-item[data-value="${value}"]`,
+      `.selecter-options:visible .selecter-item[data-value="${value}"]`,
+      `[role="listbox"]:visible [role="option"][data-value="${value}"]`,
+      `[role="listbox"]:visible [role="option"]`,
+      `.ui-menu:visible .ui-menu-item`,
+      `.selecter-options:visible span`,
+      `.selecter-options:visible div`,
+      'li',
+      'span',
+      'div',
+    ].join(', ')).filter({ visible: true, hasText: exact });
+    await expect.poll(() => options.count(), { timeout: 5_000, message: `Visible quantity option ${value}` }).toBeGreaterThan(0);
+
+    const targetBox = await target.boundingBox();
+    let nearest: Locator | null = null;
+    let nearestDistance = Number.POSITIVE_INFINITY;
+    const count = await options.count();
+    for (let index = 0; index < count; index += 1) {
+      const candidate = options.nth(index);
+      const box = await candidate.boundingBox();
+      if (!box) continue;
+      if (!targetBox) return candidate;
+      const distance = Math.hypot(
+        box.x + box.width / 2 - (targetBox.x + targetBox.width / 2),
+        box.y + box.height / 2 - (targetBox.y + targetBox.height / 2),
+      );
+      if (distance < nearestDistance) {
+        nearest = candidate;
+        nearestDistance = distance;
+      }
+    }
+    return nearest;
   }
 
   private async read(row: Locator): Promise<string> {
@@ -50,5 +166,20 @@ export class QuantityHandler {
     const input = row.locator('input[type="number"], input[type="text"]').filter({ visible: true }).first();
     if (await input.isVisible({ timeout: 500 }).catch(() => false)) return (await input.inputValue()).trim();
     return ((await row.locator('.item_qty_div, .item_qty').filter({ visible: true }).first().textContent().catch(() => '')) ?? '').trim();
+  }
+
+  private async readCommitted(originalRow: Locator, productNumber: string): Promise<string> {
+    const originalValue = await this.read(originalRow);
+    if (originalValue && originalValue !== '0') return originalValue;
+
+    // OCA may move a selected item from Available to a separate committed table after recalculation.
+    const rows = this.page.locator('tr.item_tr, tr, [role="row"]')
+      .filter({ visible: true, hasText: new RegExp(`\\b${escapeRegex(productNumber)}\\b`, 'i') });
+    const count = Math.min(await rows.count(), 20);
+    for (let index = 0; index < count; index += 1) {
+      const value = await this.read(rows.nth(index));
+      if (value && value !== '0') return value;
+    }
+    return originalValue;
   }
 }

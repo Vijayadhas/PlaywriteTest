@@ -17,6 +17,20 @@ const bool = (value: Cell, defaultValue: boolean): boolean => {
   if (!normalized) return defaultValue;
   return ['true', 'yes', 'y', '1', 'enabled'].includes(normalized);
 };
+const normalizedHeader = (value: string): string => value.replace(/\s+/g, '').toLowerCase();
+const cellByHeader = (row: Row, ...headers: string[]): Cell => {
+  const accepted = new Set(headers.map(normalizedHeader));
+  const entries = Object.entries(row).filter(([header]) => accepted.has(normalizedHeader(header)));
+  return entries.find(([, value]) => text(value))?.[1] ?? entries[0]?.[1];
+};
+const solutionFlag = (row: Row): boolean => {
+  const explicit = cellByHeader(row, 'Solution', 'Solutions');
+  if (bool(explicit, false) || /solution\s*wizard/i.test(text(explicit))) return true;
+  const description = cellByHeader(
+    row, 'Model Description', 'Configured Model Description', 'Solution Name', 'Product or Solution Description',
+  );
+  return /solution\s*wizard/i.test(text(description));
+};
 
 export class ExcelReader {
   constructor(private readonly validator = new ExcelValidator()) {}
@@ -61,7 +75,11 @@ export class ExcelReader {
       return {
         jobId,
         modelNumber: text(row['Model Number']),
-        solutionName: text(row['Solution Name']) || undefined,
+        modelDescription: text(cellByHeader(row, 'Model Description', 'Configured Model Description')) || undefined,
+        integrationRackPartNumber: text(cellByHeader(row, 'Integration Rack Part number', 'Integration Rack Part Number')) || undefined,
+        server: text(cellByHeader(row, 'Server')) || undefined,
+        solutionName: text(cellByHeader(row, 'Solution Name', 'Product or Solution Description')) || undefined,
+        isSolution: solutionFlag(row),
         quotationMode: 'aaS',
         serviceType: text(row['Service Type']) || 'Default',
         generateEndBom: bool(row['Generate End BOM'], true),
@@ -90,9 +108,13 @@ export class ExcelReader {
       return {
         jobId,
         modelNumber,
+        modelDescription: text(cellByHeader(row, 'Model Description', 'Configured Model Description')) || undefined,
+        integrationRackPartNumber: text(cellByHeader(row, 'Integration Rack Part number', 'Integration Rack Part Number')) || undefined,
+        server: text(cellByHeader(row, 'Server')) || undefined,
         solutionName: text(row['Solution Name']) || text(row['Product or Solution Description']) || undefined,
+        isSolution: solutionFlag(row),
         quotationMode: 'aaS',
-        serviceType: text(row['Service Type']) || text(row.Service) || 'Default',
+        serviceType: text(row['Service Type']) || text(row.Service) || 'Random',
         generateEndBom: bool(row['Generate End BOM'] ?? row['End BOM Required'], true),
         enabled: bool(row.Enabled, true),
         source: { kind: 'detailed-excel', instructions: this.flatInstructions(row, jobId) },
@@ -104,33 +126,44 @@ export class ExcelReader {
   private flatInstructions(row: Row, jobId: string): ComponentInstruction[] {
     const instructions: ComponentInstruction[] = [];
     let sequence = 10;
-    const addProduct = (section: string, productValue: Cell, quantityValue: Cell) => {
-      const productNumber = text(productValue);
-      const quantityText = text(quantityValue);
-      if (!productNumber || /^(default|automatic)$/i.test(productNumber)) return;
-      const quantity = quantityText ? Number(quantityText) : 1;
-      instructions.push({ jobId, section, productNumber, quantity, selectionType: 'quantity', sequence });
+    const addProduct = (section: string, productCell: Cell, quantityCell: Cell) => {
+      const product = text(productCell);
+      const normalized = product.toLowerCase();
+      if (!product || normalized === 'random') {
+        instructions.push({ jobId, section, selectionType: 'random', sequence });
+      } else if (normalized === 'default') {
+        instructions.push({ jobId, section, selectionType: 'default', sequence });
+      } else {
+        const quantityText = text(quantityCell);
+        instructions.push({
+          jobId,
+          section,
+          productNumber: product,
+          quantity: quantityText ? Number(quantityText) : 1,
+          selectionType: 'quantity',
+          sequence,
+        });
+      }
       sequence += 10;
     };
-    addProduct('Processor', row.Processor ?? row['Processor Part'], row['Processor Qty']);
-    addProduct('Memory', row.Memory ?? row['Memory Part'], row['Memory Qty']);
 
-    const smartProduct = text(row['Smart Chassis Product']);
-    const chassisConfig = text(row['Chassis Config'] ?? row['Smart Chassis Config']);
-    if (smartProduct && !/^(default|automatic)$/i.test(smartProduct)) {
+    addProduct('Processor', row.Processor, row['Processor Qty']);
+    addProduct('Memory', row.Memory, row['Memory Qty']);
+    addProduct('Smart Chassis', row['Smart Chassis Product'], row['Smart Chassis Qty']);
+
+    const chassisConfig = text(row['Chassis Config']);
+    if (chassisConfig && !/^(random|default)$/i.test(chassisConfig)) {
       instructions.push({
-        jobId, section: 'Smart Chassis', productNumber: smartProduct,
-        quantity: Number(text(row['Smart Chassis Qty']) || '1'), selectionType: 'quantity',
-        configurationText: chassisConfig && !/^default$/i.test(chassisConfig) ? chassisConfig : undefined,
+        jobId,
+        section: 'Smart Chassis',
+        selectionType: 'configuration',
+        configurationText: chassisConfig,
         sequence,
       });
       sequence += 10;
     }
-    if (chassisConfig && !/^default$/i.test(chassisConfig) && smartProduct.toUpperCase() !== 'P72221-B21') {
-      instructions.push({ jobId, section: 'Smart Chassis', selectionType: 'configuration', configurationText: chassisConfig, sequence });
-      sequence += 10;
-    }
-    addProduct('Power Supplies', row['Power Supply'] ?? row['Power Supply Part'], row['Power Qty'] ?? row['Power Supply Qty']);
+
+    addProduct('Power Supplies', row['Power Supply'], row['Power Qty']);
     return instructions;
   }
 

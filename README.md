@@ -28,16 +28,38 @@ adding real job data if you want to preserve the example.
 
 ### Recommended single-sheet columns
 
-`Job ID`, `Model Number`, `Solution Name`, `Quotation Mode`, `Processor`, `Processor Qty`, `Memory`,
-`Memory Qty`, `Smart Chassis Product`, `Smart Chassis Qty`, `Chassis Config`, `Power Supply`,
+`Job ID`, `Model Number`, `Model Description`, `Solution`, `Solution Name`, `Integration Rack Part number`, `Server`,
+`Quotation Mode`, `Processor`, `Processor Qty`, `Memory`, `Memory Qty`, `Smart Chassis Product`,
+`Smart Chassis Qty`, `Chassis Config`, `Power Supply`,
 `Power Qty`, `Service`, `Generate End BOM`, `Enabled`
 
 Use `Default` when OCA should retain its default selection. Use `Automatic` for an automatically
 managed Smart Chassis choice. Quotation Mode must be `aaS`. If Job ID is blank, the tool assigns
 `ROW-<worksheet-row>`.
 
-Only components with a non-default product value are modified. Quantities are verified against the
-visible committed OCA row after recalculation.
+Set `Solution` to `Yes` (case-insensitive) for a solution model. `Solutions` is also accepted for
+backward compatibility. Those rows are configured in the
+Solution Wizard tab; `No` or a blank cell keeps the existing Menu-tab flow. Processor, Memory,
+Memory Qty, and Service use their existing Excel values when supplied. Other wizard choices
+are selected randomly from the available non-placeholder options.
+
+When the model search dropdown contains several entries for the same model number, set `Model Description`
+to text from the required entry. If it is blank, the normal default entry is used; solution rows prefer the
+entry labelled `Solution Wizard`. Before Customize, non-solution rows use `Integration Rack Part number` as
+follows: blank selects Standard/Standalone, `Yes` selects any available rack part, and an exact part number
+(for example `P9K08A`) selects that part. Integration Rack selection is skipped for solution rows.
+
+For a dHCI Solution Wizard, `Server` selects the matching server family/size. Leave it blank to choose an
+available server randomly. The dHCI-only flow also selects a solution type, server model, server quantity,
+network adapter, switches, and—when Menu is available—controller chassis, nodes, capacity, and DAC cables.
+
+In the simple `Models` worksheet, a supplied processor, memory, Smart Chassis, chassis configuration,
+power supply, quantity, or Service value is used as entered. Leave a component blank or enter
+`Random` to use automatic random selection. Enter `Default` to retain OCA's existing component
+selection. A supplied product with a blank quantity defaults to quantity 1. Random processor,
+memory, and power-supply selections use quantity 1 or 2; random Smart Chassis uses quantity 1.
+Actual selections are written to `Selected Components` in the results workbook. Use the advanced
+`Components` sheet for additional or repeated component instructions.
 
 ### Optional advanced Components sheet
 
@@ -56,6 +78,20 @@ product number, with optional description disambiguation.
 `P74787-B21` processor dependency.
 
 ## Run
+
+### Windows one-click launcher
+
+After copying or cloning the project, double-click `Run-OCA.cmd`. On the first run it asks for the
+environment name, OCA URL, Excel path, results folder, browser profile, and login wait. The settings
+are stored in `.oca-local.json`, which is ignored by Git. It also installs npm packages and Chromium
+once on that laptop. Later runs open a menu for all enabled rows, one Job ID, failed
+jobs, or offline unit tests.
+
+Node.js LTS must be installed. Keep the project anywhere on the laptop; the launcher resolves paths
+from its own directory, including paths such as
+`D:\KES Doc new\EndBOM\PlaywriteTest-main\PlaywriteTest-main`.
+
+### Command line
 
 ```bash
 npm run oca -- --input ./input/models.xlsx --output ./output --headed --trace

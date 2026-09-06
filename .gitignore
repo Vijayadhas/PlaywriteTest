@@ -3,3 +3,7 @@ test-results/
 playwright-report/
 .DS_Store
 *.log
+.oca-local.json
+.oca-setup-complete
+.oca-profile/
+output/

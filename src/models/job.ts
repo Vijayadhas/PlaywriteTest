@@ -16,7 +16,11 @@ export type ConfigurationSource = DetailedConfigurationSource | ReferenceConfigu
 export interface OcaJob {
   jobId: string;
   modelNumber: string;
+  modelDescription?: string;
+  integrationRackPartNumber?: string;
+  server?: string;
   solutionName?: string;
+  isSolution: boolean;
   quotationMode: 'aaS';
   serviceType: string;
   generateEndBom: boolean;

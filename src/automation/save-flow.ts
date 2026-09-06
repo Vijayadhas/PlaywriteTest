@@ -1,4 +1,4 @@
-import { expect, type Page } from '@playwright/test';
+import { expect, type Locator, type Page } from '@playwright/test';
 import { waitForBlockingOverlay } from '../core/waits';
 
 export interface SaveOutcome { ucid: string; status: string; }
@@ -8,17 +8,38 @@ export class SaveFlow {
 
   async save(): Promise<SaveOutcome> {
     await waitForBlockingOverlay(this.page);
-    await this.page.locator('#save_icon').click();
-    await this.page.getByText('Save OCA Config', { exact: false }).filter({ visible: true }).first().click();
-    const dialog = this.page.locator('.ui-dialog, [role="dialog"]').filter({ visible: true, hasText: /Save|CLIC Status|Acknowledge/i }).last();
-    await expect(dialog).toBeVisible({ timeout: 60_000 });
-    const save = dialog.locator('#save_btn').or(dialog.getByRole('button', { name: 'Save', exact: true })).filter({ visible: true }).last();
-    for (let attempt = 1; attempt <= 3; attempt += 1) {
-      await this.acknowledge(dialog);
-      await save.click({ force: true });
+    console.log('[STEP] Opening Save menu');
+    const saveMenu = this.page.getByText('Save', { exact: true }).filter({ visible: true }).first();
+    if (await saveMenu.isVisible({ timeout: 5_000 }).catch(() => false)) await saveMenu.click({ force: true });
+    else await this.page.locator('#save #save_icon, [title="Save"] #save_icon, #save_icon').filter({ visible: true }).first().click({ force: true });
+
+    const saveConfig = this.page.getByText(/^Save OCA Config(?:uration)?(?:\s*2)?$/i)
+      .filter({ visible: true }).first();
+    await expect(saveConfig, 'Save OCA Config 2 menu item').toBeVisible({ timeout: 60_000 });
+    console.log('[STEP] Selecting Save OCA Config 2');
+    await saveConfig.click({ force: true });
+    await waitForBlockingOverlay(this.page);
+
+    const dialog = this.page.locator('.ui-dialog, [role="dialog"]')
+      .filter({ visible: true, hasText: /Save|CLIC Status|Acknowledge/i }).last();
+    await expect(dialog, 'Save OCA Config 2 dialog').toBeVisible({ timeout: 60_000 });
+
+    for (let attempt = 1; attempt <= 5; attempt += 1) {
+      console.log(`[STEP] Save acknowledgement attempt ${attempt}/5`);
+      await this.ensureAcknowledgements(dialog);
+      const saveButton = dialog.locator('#save_btn').or(dialog.getByRole('button', { name: 'Save', exact: true }))
+        .filter({ visible: true }).last();
+      await expect(saveButton).toBeVisible({ timeout: 60_000 });
+      // OCA can retain a disabled-looking CSS class after the real acknowledgement
+      // is checked. Attempt the proven coordinate click and use dialog closure as truth.
+      const saveBox = await saveButton.boundingBox();
+      if (saveBox) await this.page.mouse.click(saveBox.x + saveBox.width / 2, saveBox.y + saveBox.height / 2);
+      else await saveButton.click({ force: true });
+
       await Promise.race([
-        dialog.waitFor({ state: 'hidden', timeout: 60_000 }).catch(() => undefined),
-        this.page.getByText(/\(OCA\) has encountered a problem/).waitFor({ state: 'visible', timeout: 60_000 }).catch(() => undefined),
+        dialog.waitFor({ state: 'hidden', timeout: 25_000 }).catch(() => undefined),
+        this.page.locator('#obw_endbom_bot').filter({ visible: true }).waitFor({ state: 'visible', timeout: 25_000 }).catch(() => undefined),
+        this.page.getByText(/\(OCA\) has encountered a problem/).waitFor({ state: 'visible', timeout: 25_000 }).catch(() => undefined),
       ]);
       if (await this.page.getByText(/\(OCA\) has encountered a problem/).isVisible({ timeout: 500 }).catch(() => false)) {
         throw new Error('OCA reported an application error after Save');
@@ -27,17 +48,111 @@ export class SaveFlow {
         await waitForBlockingOverlay(this.page);
         return { ucid: await this.readUcid(), status: 'Saved' };
       }
+      console.log('[WARN] Save dialog remains open; acknowledgements will be retried');
     }
-    throw new Error('Save dialog remained open after acknowledgement and save retries');
+    throw new Error('Save dialog remained open after 5 acknowledgement and Save attempts');
   }
 
-  private async acknowledge(dialog: ReturnType<Page['locator']>): Promise<void> {
-    const ack = dialog.locator('#ack_flag, input[type="checkbox"]').filter({ visible: true }).first();
-    if (await ack.isVisible({ timeout: 1_000 }).catch(() => false) && !(await ack.isChecked().catch(() => false))) {
-      await ack.check({ force: true }).catch(async () => dialog.locator('#ack_checkbox, label[for="ack_flag"]').first().click({ force: true }));
+  private async ensureAcknowledgements(dialog: Locator): Promise<void> {
+    await this.ensureOptionalAcknowledgement(
+      dialog,
+      'CLIC Status is Unbuildable',
+      ['#clicStatus_flag', 'input[type="checkbox"][id*="clicStatus" i]', 'input[type="checkbox"][name*="clicStatus" i]'],
+      '#clicStatus_checkbox',
+      'label[for="clicStatus_flag"]',
+    );
+    await this.ensureOptionalAcknowledgement(
+      dialog,
+      'Errors before Saving as Action-Required',
+      ['#ack_flag', 'input[type="checkbox"][id*="ack" i]', 'input[type="checkbox"][name*="ack" i]'],
+      '#ack_checkbox',
+      'label[for="ack_flag"]',
+    );
+
+    // Some OCA models expose one acknowledgement and others expose both. Synchronize
+    // every real checkbox input present in the active Save dialog.
+    const allInputs = dialog.locator([
+      '#ack_flag',
+      'input[type="checkbox"][id*="ack" i]',
+      'input[type="checkbox"][name*="ack" i]',
+      'input[type="checkbox"][id*="clicStatus" i]',
+      'input[type="checkbox"][name*="clicStatus" i]',
+    ].join(', '));
+    const inputCount = await allInputs.count();
+    for (let index = 0; index < inputCount; index += 1) {
+      const input = allInputs.nth(index);
+      if (!(await input.isChecked().catch(() => false))) {
+        await input.check({ force: true }).catch(() => undefined);
+        await input.dispatchEvent('input').catch(() => undefined);
+        await input.dispatchEvent('change').catch(() => undefined);
+      }
     }
-    const clic = dialog.locator('#clicStatus').filter({ visible: true });
-    if (await clic.isVisible({ timeout: 500 }).catch(() => false)) console.log('[INFO] CLIC Status:', (await clic.innerText()).trim());
+    console.log(`[INFO] Save dialog acknowledgement checkbox count: ${inputCount}`);
+  }
+
+  private async ensureOptionalAcknowledgement(
+    dialog: Locator,
+    name: string,
+    inputSelectors: string[],
+    iconSelector: string,
+    labelSelector: string,
+  ): Promise<void> {
+    const inputs = dialog.locator(inputSelectors.join(', '));
+    const icon = dialog.locator(iconSelector).filter({ visible: true }).first();
+    const label = dialog.locator(labelSelector).filter({ visible: true }).first();
+    const iconVisible = await icon.isVisible({ timeout: 500 }).catch(() => false);
+    const labelVisible = await label.isVisible({ timeout: 500 }).catch(() => false);
+    // A visible #clicStatus_checkbox can be the red Unbuildable status icon shown
+    // beside the text, not an acknowledgement control. Require real inputs/labels as
+    // actionable; do not click a standalone status icon.
+    if (!labelVisible && await inputs.count() === 0) {
+      console.log(`[INFO] ${name} checkbox is not available; continuing`);
+      return;
+    }
+
+    if (iconVisible && await this.hasActiveCheckboxState(icon)) {
+      console.log(`[INFO] Acknowledged ${name}`);
+      return;
+    }
+
+    // Click the label first. This produces the trusted browser event expected by
+    // OCA and avoids relying on either duplicated hidden clicStatus_flag input.
+    if (labelVisible) await label.dispatchEvent('click').catch(() => undefined);
+    if (iconVisible && !(await this.hasActiveCheckboxState(icon))) {
+      await icon.dispatchEvent('mousedown').catch(() => undefined);
+      await icon.dispatchEvent('mouseup').catch(() => undefined);
+      await icon.dispatchEvent('click').catch(() => undefined);
+    }
+    await this.page.waitForTimeout(500);
+
+    if (iconVisible && !(await this.hasActiveCheckboxState(icon))) {
+      const box = await icon.boundingBox();
+      if (box) await this.page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+      await this.page.waitForTimeout(500);
+    }
+
+    // Synchronize every duplicate hidden input only after the real visual click.
+    for (let index = 0; index < await inputs.count(); index += 1) {
+      const input = inputs.nth(index);
+      if (!(await input.isChecked().catch(() => false))) {
+        await input.check({ force: true }).catch(() => undefined);
+        await input.dispatchEvent('change').catch(() => undefined);
+      }
+    }
+
+    const selected = (iconVisible && await this.hasActiveCheckboxState(icon))
+      || await inputs.first().isChecked().catch(() => false);
+    if (selected) console.log(`[INFO] Acknowledged ${name}`);
+    else console.log(`[WARN] ${name} did not expose a confirmed checked state; Save-button state will decide whether another attempt is needed`);
+  }
+
+  private async hasActiveCheckboxState(icon: Locator): Promise<boolean> {
+    const state = [
+      await icon.getAttribute('class').catch(() => ''),
+      await icon.getAttribute('aria-checked').catch(() => ''),
+      await icon.getAttribute('data-checked').catch(() => ''),
+    ].join(' ');
+    return /checkbox_active|\bactive\b|\bchecked\b|\bselected\b|\btrue\b/i.test(state);
   }
 
   private async readUcid(): Promise<string> {
