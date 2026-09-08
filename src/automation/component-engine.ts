@@ -156,11 +156,11 @@ export class ComponentEngine {
         `No visible rows matched ProcessorSection_ProcessorChoice (visible processor candidates: ${count})`,
       );
     }
-    const selected = available[Math.floor(Math.random() * available.length)];
-    const quantity = Math.random() < 0.5 ? 1 : 2;
-    console.log(`[STEP] Random processor selected: ${selected.productNumber} x${quantity}`);
-    await this.quantities.set(selected.row, selected.productNumber, quantity);
-    return { productNumber: selected.productNumber, quantity };
+    return this.tryRandomCandidates('Processor', available, async (selected) => {
+      const quantity = Math.random() < 0.5 ? 1 : 2;
+      await this.quantities.set(selected.row, selected.productNumber, quantity);
+      return { productNumber: selected.productNumber, quantity };
+    });
   }
 
   async selectRandomMemory(): Promise<{ productNumber: string; quantity: number }> {
@@ -190,13 +190,11 @@ export class ComponentEngine {
         `No visible rows matched memory_memorySlotsChoice (visible memory candidates: ${count})`,
       );
     }
-    const selected = available[Math.floor(Math.random() * available.length)];
-    const quantity = Math.random() < 0.5 ? 1 : 2;
-    console.log(`[STEP] Random memory selected: ${selected.productNumber} x${quantity}`);
-    // Memory must be confirmed after OCA recalculation. Never continue when the
-    // available row still reads 0, because that means the DIMM was not committed.
-    await this.quantities.set(selected.row, selected.productNumber, quantity, true);
-    return { productNumber: selected.productNumber, quantity };
+    return this.tryRandomCandidates('Memory', available, async (selected) => {
+      const quantity = Math.random() < 0.5 ? 1 : 2;
+      await this.quantities.set(selected.row, selected.productNumber, quantity, true);
+      return { productNumber: selected.productNumber, quantity };
+    });
   }
 
   async selectRandomSmartChassis(): Promise<{ productNumber: string; description: string; quantity: number }> {
@@ -246,12 +244,12 @@ export class ComponentEngine {
         `No visible Smart Chassis rows matched ${this.serverFamily} layout ${elementId ?? '(generic)'} (visible candidates: ${count})`,
       );
     }
-    const selected = available[Math.floor(Math.random() * available.length)];
-    console.log(`[STEP] Random Smart Chassis selected: ${selected.description} (${selected.productNumber}) x1`);
-    await this.radios.select(selected.row, selected.description);
-    await waitForBlockingOverlay(this.page);
-    await this.quantities.verify(selected.row, selected.productNumber, 1);
-    return { productNumber: selected.productNumber, description: selected.description, quantity: 1 };
+    return this.tryRandomCandidates('Smart Chassis', available, async (selected) => {
+      await this.radios.select(selected.row, selected.description);
+      await waitForBlockingOverlay(this.page);
+      await this.quantities.verify(selected.row, selected.productNumber, 1);
+      return { productNumber: selected.productNumber, description: selected.description, quantity: 1 };
+    });
   }
 
   async selectRandomPowerSupply(): Promise<{ productNumber: string; description: string; quantity?: number }> {
@@ -284,13 +282,47 @@ export class ComponentEngine {
     if (!available.length) {
       throw new UnsupportedComponentError(`No visible Power Supply product rows were available (visible candidates: ${count})`);
     }
-    const selected = available[Math.floor(Math.random() * available.length)];
-    // Quantity 1 is the proven valid committed value for the supported base-model
-    // power-slot layouts. OCA can add required redundant dependencies itself.
-    const quantity = 1;
-    console.log(`[STEP] Random Power Supply selected: ${selected.description} (${selected.productNumber}) x${quantity}`);
-    await this.quantities.set(selected.row, selected.productNumber, quantity, false);
-    return { productNumber: selected.productNumber, description: selected.description, quantity };
+    return this.tryRandomCandidates('Power Supplies', available, async (selected) => {
+      await this.quantities.set(selected.row, selected.productNumber, 1, true);
+      return { productNumber: selected.productNumber, description: selected.description, quantity: 1 };
+    });
+  }
+
+  private async tryRandomCandidates<T extends { row: Locator; productNumber: string }, R>(
+    section: string, candidates: T[], select: (candidate: T) => Promise<R>,
+  ): Promise<R> {
+    const remaining: T[] = [];
+    // Capture identities before the first action can reorder any choice table.
+    for (const candidate of candidates) {
+      const id = await candidate.row.getAttribute('id');
+      remaining.push({ ...candidate, row: id ? this.page.locator(`[id=${JSON.stringify(id)}]`) : candidate.row });
+    }
+    const failures: string[] = [];
+    while (remaining.length) {
+      const [candidate] = remaining.splice(Math.floor(Math.random() * remaining.length), 1);
+      const before = await this.quantities.committedQuantity(candidate.row, candidate.productNumber);
+      console.log(`[STEP] Random ${section} candidate ${failures.length + 1}/${candidates.length}: ${candidate.productNumber}`);
+      try {
+        const result = await select(candidate);
+        console.log(`[INFO] ${section} selected successfully: ${candidate.productNumber}`);
+        return result;
+      } catch (error) {
+        if (this.page.isClosed() || /page, context or browser has been closed|browser.*disconnected/i.test(String(error))) throw error;
+        const message = String(error).split('\n')[0];
+        failures.push(`${candidate.productNumber}: ${message}`);
+        console.log(`[WARN] ${section} candidate ${candidate.productNumber} failed: ${message}`);
+        await this.page.keyboard.press('Escape');
+        await waitForBlockingOverlay(this.page);
+        const after = await this.quantities.committedQuantity(candidate.row, candidate.productNumber);
+        if (after !== before) {
+          if (!/^\d+$/.test(before)) throw new Error(`Cannot safely restore failed ${section} candidate ${candidate.productNumber}; previous quantity was unreadable`, { cause: error });
+          console.log(`[STEP] Restoring failed candidate ${candidate.productNumber} to quantity ${before} before fallback`);
+          await this.quantities.set(candidate.row, candidate.productNumber, Number(before), true);
+        }
+        if (remaining.length) console.log(`[STEP] Trying another random ${section} candidate (${remaining.length} remaining)`);
+      }
+    }
+    throw new Error(`All ${section} candidates failed: ${failures.join(' | ')}`);
   }
 
   async executeGeneric(instruction: ComponentInstruction): Promise<void> {
@@ -349,7 +381,18 @@ export class ComponentEngine {
     if (/^processor$/i.test(sectionName)) { await this.selectRandomProcessor(); return; }
     if (/^memory$/i.test(sectionName)) { await this.selectRandomMemory(); return; }
     if (/^smart\s*chassis$/i.test(sectionName)) { await this.selectRandomSmartChassis(); return; }
-    if (/^power\s*suppl(?:y|ies)$/i.test(sectionName)) { await this.selectRandomPowerSupply(); return; }
+    if (/^power\s*suppl(?:y|ies)$/i.test(sectionName)) {
+      const selected = await this.selectRandomPowerSupply();
+      await waitForBlockingOverlay(this.page);
+      const invalidHeader = this.page.locator('[id*="section_header" i][id*="power" i]')
+        .filter({ has: this.page.locator('[title="Error" i]:visible, [aria-label="Error" i]:visible, .dqe-status-icon-14:visible') });
+      if (await invalidHeader.count()) {
+        const rows = (await this.powerSupplyRows().allTextContents()).map((text) => text.replace(/\s+/g, ' ').trim());
+        throw new Error(`Power Supplies still has a mandatory error after selecting ${selected.productNumber} x${selected.quantity}. `
+          + `The selected quantity alone does not satisfy this section; stopping instead of repeating the same selection. Power slot rows: ${rows.join(' | ')}`);
+      }
+      return;
+    }
     if (!await this.satisfyVisibleRequiredControl()) {
       throw new UnsupportedComponentError(`No selectable required control was found in error section ${sectionName}`);
     }
@@ -456,13 +499,15 @@ export class ComponentEngine {
   }
 
   private powerSupplyRows(): Locator {
+    // The power section also contains cords and other accessories. A positive
+    // quantity anywhere under "power" does not mean a PSU slot is populated.
+    // These are the slot identities in the recorded base-model OCA layouts.
     const identified = this.page.locator([
-      'tr.item_tr[id*="_power_" i]',
-      'tr.item_tr[data-elementid*="power" i]',
-      'tr[role="row"][id*="_power_" i]',
+      'tr.item_tr[id$="_power_powerSlots" i]',
+      'tr.item_tr[data-elementid="power_powerSlots" i]',
+      'tr[role="row"][id$="_power_powerSlots" i]',
     ].join(', '));
-    const described = this.page.locator('tr.item_tr, tr[role="row"]').filter({ hasText: /Power Supply/i });
-    return identified.or(described).filter({ visible: true })
+    return identified.filter({ visible: true })
       .filter({ has: this.page.locator('td.item_qty .item_qty_div, td.item_qty select') })
       .filter({ has: this.page.locator('._pid') });
   }

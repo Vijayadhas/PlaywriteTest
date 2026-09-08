@@ -4,6 +4,10 @@ import { escapeRegex, waitForBlockingOverlay } from '../core/waits';
 export class QuantityHandler {
   constructor(private readonly page: Page) {}
 
+  async committedQuantity(row: Locator, productNumber: string): Promise<string> {
+    return this.readCommitted(row, productNumber);
+  }
+
   async set(originalRow: Locator, productNumber: string, quantity: number, requireStableVerification = true): Promise<void> {
     // Random choices arrive as nth() locators. Recalculation can reorder those
     // rows, so retain the row identity before performing any action.

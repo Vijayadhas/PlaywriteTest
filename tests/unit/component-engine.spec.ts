@@ -38,3 +38,25 @@ test('does not mistake hidden menu digits for a committed power quantity', async
   await new ComponentEngine(page, 'DL360').executeGeneric({ jobId: 'test', section: 'Power Supplies', selectionType: 'random', sequence: 40 });
   await expect(page.locator('select')).toHaveValue('1');
 });
+
+test('ignores selected power accessories and populates the actual PSU slot', async ({ page }) => {
+  await page.setContent(`<table>
+    <tr class="item_tr" id="item_tr_CORD_power_powerCords"><td class="_pid">CORD</td>
+      <td class="item_desc">Power Supply Cord</td><td class="item_qty"><div class="item_qty_div">1</div></td></tr>
+    <tr class="item_tr" id="item_tr_PSU_power_powerSlots"><td class="_pid">PSU</td>
+      <td class="item_desc">Power Supply</td><td class="item_qty"><div class="item_qty_div">0</div>
+        <select><option>0</option><option>1</option></select></td></tr>
+  </table>`);
+  const instruction = { jobId: 'test', section: 'Power Supplies', selectionType: 'random' as const, sequence: 40 };
+  await new ComponentEngine(page, 'DL360').executeGeneric(instruction);
+  expect(instruction).toMatchObject({ productNumber: 'PSU', quantity: 1 });
+  await expect(page.locator('select')).toHaveValue('1');
+});
+
+test('stops with diagnostics when a selected PSU does not clear the mandatory error', async ({ page }) => {
+  await page.setContent(`<div id="section_header_power">Power Supplies<i title="Error">!</i></div>
+    <table><tr class="item_tr" id="item_tr_PSU_power_powerSlots"><td class="_pid">PSU</td>
+      <td class="item_desc">Power Supply</td><td class="item_qty"><div class="item_qty_div">1</div></td></tr></table>`);
+  await expect(new ComponentEngine(page, 'DL360').satisfyRequiredSection('Power Supplies'))
+    .rejects.toThrow('Power Supplies still has a mandatory error after selecting PSU x1');
+});
