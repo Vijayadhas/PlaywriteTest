@@ -14,6 +14,13 @@ The following setup steps are assumed to be complete:
 
 ## Recommended — one-click launcher
 
+For the web interface, double-click `Run-OCA-UI.cmd`. On its first run, enter the OCA URL, browser
+profile, and login wait when prompted. It installs missing packages and Chromium, starts the local
+dashboard, and opens `http://localhost:4173` automatically. Import Excel or enter models manually in
+the browser, then click **Start automation**. Keep the launcher window open for the entire run.
+
+The existing `Run-OCA.cmd` remains available for the command-line menu workflow described below.
+
 1. Install the Node.js LTS release if it is not already installed.
 2. If the project was downloaded as a ZIP, right-click it and choose **Extract All**. Do not open or run files directly inside the ZIP preview.
 3. Open the complete extracted project folder in File Explorer. Confirm that `Run-OCA.cmd` and the `scripts` folder are both present.

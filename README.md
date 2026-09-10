@@ -79,6 +79,25 @@ product number, with optional description disambiguation.
 
 ## Run
 
+### Web dashboard
+
+On Windows, double-click `Run-OCA-UI.cmd`. The launcher installs missing dependencies on the first
+run, loads the same `.oca-local.json` OCA settings used by the command-line launcher, starts the UI,
+and opens the dashboard automatically. Keep its console window open while tests are running; press
+`Ctrl+C` to stop the UI server.
+
+On macOS, Linux, or from a terminal:
+
+```bash
+npm run ui
+```
+
+Open `http://localhost:4173`. The dashboard accepts the existing Excel format or manual model and
+component entry, starts the same Playwright automation, shows the current model and batch progress,
+and provides live results plus an Excel download. Runs are stored locally under `.oca-ui/runs`.
+Set `OCA_UI_PORT` to use a different port. Environment variables and the persistent OCA browser
+profile work exactly as they do for the command-line runner.
+
 ### Windows one-click launcher
 
 After copying or cloning the project, double-click `Run-OCA.cmd`. On the first run it asks for the

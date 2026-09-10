@@ -6,4 +6,5 @@ playwright-report/
 .oca-local.json
 .oca-setup-complete
 .oca-profile/
+.oca-ui/
 output/

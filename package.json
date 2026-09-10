@@ -5,6 +5,7 @@
   "private": true,
   "scripts": {
     "oca": "tsx src/main.ts",
+    "ui": "tsx src/app/ui-server.ts",
     "sample:excel": "tsx scripts/create-sample-workbook.ts",
     "lint": "eslint src scripts tests/unit --ext .ts",
     "test": "playwright test",
@@ -13,6 +14,8 @@
   },
   "devDependencies": {
     "@playwright/test": "^1.48.0",
+    "@types/express": "^5.0.6",
+    "@types/multer": "^2.2.0",
     "@types/node": "^20.14.0",
     "@typescript-eslint/eslint-plugin": "^7.18.0",
     "@typescript-eslint/parser": "^7.18.0",
@@ -21,6 +24,8 @@
     "typescript": "^5.5.0"
   },
   "dependencies": {
+    "express": "^5.2.1",
+    "multer": "^2.3.0",
     "xlsx": "^0.18.5"
   }
 }
